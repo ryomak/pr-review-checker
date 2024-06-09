@@ -1,2 +1,5 @@
 .env
 pr_data.csv
+.DS_Store
+.idea
+review_to_approve_time.png

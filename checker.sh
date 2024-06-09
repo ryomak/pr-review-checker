@@ -1,4 +1,16 @@
+#!/usr/bin/env ruby
 # frozen_string_literal: true
+
+require 'bundler/inline'
+
+gemfile do
+  source 'https://rubygems.org'
+  gem 'octokit'
+  gem 'csv'
+  gem 'dotenv'
+  gem 'gruff'
+  gem 'business_time'
+end
 
 require 'octokit'
 require 'csv'
@@ -12,7 +24,7 @@ BusinessTime::Config.work_week = [:mon, :tue, :wed, :thu, :fri]
 
 class PullRequestResult
   attr_accessor :number, :title, :author, :created_at, :review_requested_at,
-                :opened_at, :approved_at, :merged_at, :merge_commit_sha
+                :opened_at, :first_comment_at, :approved_at, :merged_at, :merge_commit_sha
 
   def initialize(pr, events, reviews, comments)
     @number = pr.number
@@ -36,18 +48,6 @@ class PullRequestResult
 
     business_hours = @review_requested_at.business_time_until(@approved_at)
     (business_hours / 3600).round(2) # 時間単位に変換
-  end
-
-  def review_to_first_comment_time
-    return nil unless @review_requested_at && first_comment_or_approve_at
-
-    business_hours = @review_requested_at.business_time_until(first_comment_or_approve_at)
-    (business_hours / 3600).round(2) # 時間単位に変換
-  end
-
-  def first_comment_or_approve_at
-    return @first_comment_at if @first_comment_at
-    @approved_at
   end
 
   private
@@ -109,7 +109,7 @@ class ReviewChecker
   def create_result(pr)
     events = @client.issue_events(@repo, pr.number)
     reviews = @client.pull_request_reviews(@repo, pr.number)
-    comments =  @client.issue_comments(@repo, pr.number)
+    comments = @client.issue_comments(@repo, pr.number)
     PullRequestResult.new(pr, events, reviews, comments)
   end
 
@@ -126,9 +126,9 @@ class CSVWriter
     @pr_results = pr_results
   end
 
-  def execute!(filename="pr_data.csv")
+  def execute!(filename = "pr_data.csv")
     CSV.open(filename, "w") do |csv|
-      csv << %w["PR番号", "タイトル", "作成時刻", "レビュー依頼時刻", "Open時刻", "最初のコメント時刻", "approve時刻", "merge時刻", "レビュー依頼からapproveまでの時間(時間)"]
+      csv << %w["PR番号" "タイトル" "作成時刻" "レビュー依頼時刻" "Open時刻" "最初のコメント時刻" "approve時刻" "merge時刻" "レビュー依頼からapproveまでの時間(時間)"]
 
       @pr_results.each do |result_data|
         csv << [
@@ -137,7 +137,7 @@ class CSVWriter
           result_data.created_at,
           result_data.review_requested_at,
           result_data.opened_at,
-          result_data.first_comment_or_approve_at,
+          result_data.first_comment_at,
           result_data.approved_at,
           result_data.merged_at,
           result_data.review_to_approve_time
@@ -155,64 +155,30 @@ class GraphGenerator
   end
 
   def execute!
-    weekly_approval_data = Hash.new { |hash, key| hash[key] = [] }
-    weekly_first_comment_data = Hash.new { |hash, key| hash[key] = [] }
+    weekly_data = Hash.new { |hash, key| hash[key] = [] }
 
     @pr_results.each do |pr|
       next unless pr.review_requested_at && pr.approved_at
 
       week = pr.review_requested_at.strftime('%Y-%U')
-      weekly_approval_data[week] << pr.review_to_approve_time
-      weekly_first_comment_data[week] << pr.review_to_first_comment_time
+      weekly_data[week] << pr.review_to_approve_time
     end
 
-    weekly_approval_avg = weekly_approval_data.map do |week, times|
-      times.compact!
-      [week, times.empty? ? 0 : times.sum / times.size]
-    end.to_h
-
-    weekly_approval_median = weekly_approval_data.map do |week, times|
-      times.compact!
-      [week, times.empty? ? 0 : median(times)]
-    end.to_h
-
-    weekly_first_comment_avg = weekly_first_comment_data.map do |week, times|
-      times.compact!
-      [week, times.empty? ? 0 : times.sum / times.size]
-    end.to_h
-
-    weekly_first_comment_median = weekly_first_comment_data.map do |week, times|
-      times.compact!
-      [week, times.empty? ? 0 : median(times)]
-    end.to_h
-
-    all_weeks = (weekly_approval_avg.keys + weekly_first_comment_avg.keys).uniq.sort
+    weekly_avg = weekly_data.map { |week, times| [week, times.sum / times.size] }.to_h
 
     g = Gruff::Line.new
-    g.title = 'Average and 50%ile Review Request to Approval and First Comment Time per Week'
-    g.labels = all_weeks.each_with_index.map { |week, i| [i, week] }.to_h
-    g.data(:'Average Approval', all_weeks.map { |week| weekly_approval_avg[week] || 0 })
-    g.data(:'50%ile Approval', all_weeks.map { |week| weekly_approval_median[week] || 0 })
-    g.data(:'Average First Comment', all_weeks.map { |week| weekly_first_comment_avg[week] || 0 })
-    g.data(:'50%ile First Comment', all_weeks.map { |week| weekly_first_comment_median[week] || 0 })
+    g.title = 'Average Review Request to Approval Time per Week'
+    g.labels = weekly_avg.each_with_index.map { |(week, _), i| [i, week] }.to_h
+    g.data(:'Average Time (hours)', weekly_avg.values)
     g.write('review_to_approve_time.png')
 
     puts "グラフを作成しました: review_to_approve_time.png"
   end
-
-  def median(array)
-    sorted = array.sort
-    len = sorted.length
-    (sorted[(len - 1) / 2] + sorted[len / 2]) / 2.0
-  end
-
-
 end
 
 # 実行
 from_date = '2024-05-01'
-to_date = '2024-06-30'   
+to_date = '2024-06-30'
 
-checker = ReviewChecker.new(from_date,to_date)
+checker = ReviewChecker.new(from_date, to_date)
 checker.execute!
-
