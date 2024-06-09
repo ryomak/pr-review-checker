@@ -7,7 +7,7 @@ require 'gruff'
 require 'business_time'
 
 BusinessTime::Config.beginning_of_workday = "10:00 am"
-BusinessTime::Config.end_of_workday = "07:00 pm"
+BusinessTime::Config.end_of_workday = "23:59 pm"
 BusinessTime::Config.work_week = [:mon, :tue, :wed, :thu, :fri]
 
 class PullRequestResult
@@ -18,12 +18,12 @@ class PullRequestResult
     @number = pr.number
     @title = pr.title
     @author = pr.user.login
-    @created_at = pr.created_at
-    @opened_at = pr.created_at
+    @created_at = pr.created_at.in_time_zone('Tokyo')
+    @opened_at = pr.created_at.in_time_zone('Tokyo')
     @review_requested_at = nil
     @first_comment_at = nil
     @approved_at = nil
-    @merged_at = pr.merged_at
+    @merged_at = nil
     @merge_commit_sha = pr.merge_commit_sha
 
     calculate_by_events(events)
@@ -54,8 +54,8 @@ class PullRequestResult
 
   def calculate_by_events(events)
     events.each do |event|
-      @review_requested_at ||= event.created_at if event.event == 'review_requested'
-      @merged_at = event.created_at if event.commit_id == @merge_commit_sha && event.event == 'closed'
+      @review_requested_at ||= event.created_at.in_time_zone('Tokyo') if event.event == 'review_requested'
+      @merged_at = event.created_at.in_time_zone('Tokyo') if event.commit_id == @merge_commit_sha && event.event == 'closed'
     end
   end
 
@@ -64,14 +64,15 @@ class PullRequestResult
       if comment.user.login == author
         next
       end
-      @first_comment_at ||= comment.created_at
-      @first_comment_at = comment.created_at if @first_comment_at > comment.created_at
+      comment_created_at = comment.created_at.in_time_zone('Tokyo')
+      @first_comment_at ||= comment_created_at
+      @first_comment_at = comment_created_at if @first_comment_at >comment_created_at
     end
   end
 
   def calculate_by_reviews(reviews)
     reviews.each do |review|
-      @approved_at ||= review.submitted_at if review.state == 'APPROVED'
+      @approved_at ||= review.submitted_at.in_time_zone('Tokyo') if review.state == 'APPROVED'
     end
   end
 end
@@ -103,7 +104,7 @@ class ReviewChecker
     prs.sort_by! { |pr| pr.created_at }
     prs.map do |pr|
       create_result(pr)
-    end
+    end.select { |pr| !pr.review_requested_at.blank? }
   end
 
   def create_result(pr)
@@ -117,7 +118,7 @@ class ReviewChecker
     results = fetch_results
 
     CSVWriter.new(results).execute!
-    GraphGenerator.new(results).execute!
+    GraphGenerator.new(results).execute_line!
   end
 end
 
@@ -128,7 +129,7 @@ class CSVWriter
 
   def execute!(filename="pr_data.csv")
     CSV.open(filename, "w") do |csv|
-      csv << %w["PR番号", "タイトル", "作成時刻", "レビュー依頼時刻", "Open時刻", "最初のコメント時刻", "approve時刻", "merge時刻", "レビュー依頼からapproveまでの時間(時間)"]
+      csv << %w[PR番号, タイトル, 作成時刻, レビュー依頼時刻, Open時刻, 最初のコメント時刻, approve時刻, merge時刻, レビュー依頼からコメントまでの時間, レビュー依頼からapproveまでの時間]
 
       @pr_results.each do |result_data|
         csv << [
@@ -140,6 +141,7 @@ class CSVWriter
           result_data.first_comment_or_approve_at,
           result_data.approved_at,
           result_data.merged_at,
+          result_data.review_to_first_comment_time,
           result_data.review_to_approve_time
         ]
       end
@@ -154,7 +156,7 @@ class GraphGenerator
     @pr_results = pr_results
   end
 
-  def execute!
+  def execute_line!
     weekly_approval_data = Hash.new { |hash, key| hash[key] = [] }
     weekly_first_comment_data = Hash.new { |hash, key| hash[key] = [] }
 
@@ -191,21 +193,24 @@ class GraphGenerator
     g = Gruff::Line.new
     g.title = 'Average and 50%ile Review Request to Approval and First Comment Time per Week'
     g.labels = all_weeks.each_with_index.map { |week, i| [i, week] }.to_h
+
     g.data(:'Average Approval', all_weeks.map { |week| weekly_approval_avg[week] || 0 })
-    g.data(:'50%ile Approval', all_weeks.map { |week| weekly_approval_median[week] || 0 })
     g.data(:'Average First Comment', all_weeks.map { |week| weekly_first_comment_avg[week] || 0 })
+
+    g.data(:'50%ile Approval', all_weeks.map { |week| weekly_approval_median[week] || 0 })
     g.data(:'50%ile First Comment', all_weeks.map { |week| weekly_first_comment_median[week] || 0 })
     g.write('review_to_approve_time.png')
 
     puts "グラフを作成しました: review_to_approve_time.png"
   end
 
+  private
+
   def median(array)
     sorted = array.sort
     len = sorted.length
     (sorted[(len - 1) / 2] + sorted[len / 2]) / 2.0
   end
-
 
 end
 
