@@ -7,7 +7,7 @@ require 'gruff'
 require 'business_time'
 
 BusinessTime::Config.beginning_of_workday = "10:00 am"
-BusinessTime::Config.end_of_workday = "23:59 pm"
+BusinessTime::Config.end_of_workday = "20:00 pm"
 BusinessTime::Config.work_week = [:mon, :tue, :wed, :thu, :fri]
 
 class PullRequestResult
